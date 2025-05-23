@@ -1,5 +1,7 @@
 LOCAL_PATH := $(call my-dir)
 
+ifneq ($(TARGET_PROVIDES_POWERHAL),true)
+
 ifeq ($(call is-vendor-board-platform,QCOM),true)
 
 include $(CLEAR_VARS)
@@ -111,6 +113,8 @@ LOCAL_VENDOR_MODULE := true
 LOCAL_STATIC_LIBRARIES += libbinder_random_parcel
 
 include $(BUILD_FUZZ_TEST)
+endif
+
 endif
 
 endif
