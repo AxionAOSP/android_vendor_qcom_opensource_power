@@ -125,6 +125,7 @@ void release() {
                  __func__, ret, errno);
     }
     pthread_mutex_unlock(&interaction_lock);
+    power_enforce_node_ceilings();
 }
 
 void abortWaitLocked() {
@@ -284,6 +285,7 @@ void process_interaction_hint(void* data) {
         release_boost(prev_interaction_handle);
         prev_interaction_handle = interaction_handle;
         pthread_mutex_unlock(&interaction_lock);
+        power_enforce_node_ceilings();
         return;
     }
 
@@ -296,6 +298,7 @@ void process_interaction_hint(void* data) {
     mState = INTERACTION_STATE_INTERACTION;
     pthread_cond_signal(&interaction_cond);
     pthread_mutex_unlock(&interaction_lock);
+    power_enforce_node_ceilings();
 }
 
 void process_activity_launch_hint(void* data) {
@@ -308,6 +311,7 @@ void process_activity_launch_hint(void* data) {
             launch_handle = -1;
         }
         launch_mode = 0;
+        power_enforce_node_ceilings();
         return;
     }
 
@@ -319,6 +323,7 @@ void process_activity_launch_hint(void* data) {
             return;
         }
         launch_mode = 1;
+        power_enforce_node_ceilings();
     }
 }
 

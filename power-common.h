@@ -57,6 +57,7 @@ void power_hint(power_hint_t hint, void* data);
 bool is_expensive_rendering_supported();
 void set_expensive_rendering(bool enabled);
 void set_interactive(int on);
+void power_enforce_node_ceilings(void);
 
 #define ARRAY_SIZE(x) (sizeof((x)) / sizeof((x)[0]))
 #define CHECK_HANDLE(x) ((x) > 0)

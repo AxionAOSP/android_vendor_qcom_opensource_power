@@ -38,6 +38,9 @@
 
 #include <android-base/file.h>
 #include <android-base/logging.h>
+#include <android-base/strings.h>
+#include <climits>
+#include <cstdlib>
 #include <fmq/AidlMessageQueue.h>
 #include <fmq/EventFlag.h>
 #include <thread>
@@ -70,6 +73,30 @@ namespace impl {
 extern bool isDeviceSpecificModeSupported(Mode type, bool* _aidl_return);
 extern bool setDeviceSpecificMode(Mode type, bool enabled);
 #endif
+
+static std::string resolveCanonical(const std::string& path) {
+    char resolved[PATH_MAX];
+    return realpath(path.c_str(), resolved) ? resolved : path;
+}
+
+static Power* sInstance = nullptr;
+
+Power::Power() : BnPower() {
+    sInstance = this;
+    power_init();
+}
+
+Power::~Power() {
+    if (sInstance == this) {
+        sInstance = nullptr;
+    }
+}
+
+extern "C" void power_enforce_node_ceilings(void) {
+    if (sInstance) {
+        sInstance->applyCeilings();
+    }
+}
 
 void setInteractive(bool interactive) {
     set_interactive(interactive ? 1 : 0);
@@ -118,6 +145,7 @@ ndk::ScopedAStatus Power::setMode(Mode type, bool enabled) {
             LOG(INFO) << "Mode " << static_cast<int32_t>(type) << "Not Supported";
             break;
     }
+    applyCeilings();
     return ndk::ScopedAStatus::ok();
 }
 
@@ -162,6 +190,7 @@ ndk::ScopedAStatus Power::setBoost(Boost type, int32_t durationMs) {
             LOG(INFO) << "Boost " << static_cast<int32_t>(type) << "Not Supported";
             break;
     }
+    applyCeilings();
     return ndk::ScopedAStatus::ok();
 }
 
@@ -279,6 +308,133 @@ ndk::ScopedAStatus Power::sendCompositionData(const std::vector<CompositionData>
 ndk::ScopedAStatus Power::sendCompositionUpdate(const CompositionUpdate&) {
     LOG(INFO) << "Power sendCompositionUpdate";
     return ndk::ScopedAStatus::ok();
+}
+
+ndk::ScopedAStatus Power::setNodeCeiling(const std::string& in_nodePath, int64_t in_maxCeiling,
+                                        int64_t in_minFloor) {
+    LOG(INFO) << "Power setNodeCeiling: " << in_nodePath << " max: " << in_maxCeiling
+              << " min: " << in_minFloor;
+
+    if (in_nodePath.empty()) {
+        return ndk::ScopedAStatus::ok();
+    }
+
+    if (in_maxCeiling <= 0 && in_minFloor <= 0) {
+        return clearNodeCeiling(in_nodePath);
+    }
+
+    std::string canonicalPath = resolveCanonical(in_nodePath);
+    std::lock_guard<std::mutex> lock(mCeilingLock);
+
+    auto it = mNodeCeilings.find(canonicalPath);
+    if (it == mNodeCeilings.end()) {
+        std::string currentVal;
+        if (::android::base::ReadFileToString(canonicalPath, &currentVal, true)) {
+            currentVal = ::android::base::Trim(currentVal);
+        }
+        NodeCeilingInfo info;
+        info.canonicalPath = canonicalPath;
+        info.defaultValue = currentVal;
+        info.maxCeiling = in_maxCeiling;
+        info.minFloor = in_minFloor;
+        mNodeCeilings[canonicalPath] = info;
+    } else {
+        it->second.maxCeiling = in_maxCeiling;
+        it->second.minFloor = in_minFloor;
+    }
+
+    std::string currentVal;
+    if (::android::base::ReadFileToString(canonicalPath, &currentVal, true)) {
+        currentVal = ::android::base::Trim(currentVal);
+        char* end = nullptr;
+        int64_t val = strtoll(currentVal.c_str(), &end, 10);
+        if (end != currentVal.c_str() && *end == '\0') {
+            int64_t clamped = val;
+            if (in_maxCeiling > 0 && clamped > in_maxCeiling) clamped = in_maxCeiling;
+            if (in_minFloor > 0 && clamped < in_minFloor) clamped = in_minFloor;
+            ::android::base::WriteStringToFile(std::to_string(clamped), canonicalPath, true);
+        } else {
+            int64_t target = in_maxCeiling > 0 ? in_maxCeiling : in_minFloor;
+            ::android::base::WriteStringToFile(std::to_string(target), canonicalPath, true);
+        }
+    } else {
+        int64_t target = in_maxCeiling > 0 ? in_maxCeiling : in_minFloor;
+        ::android::base::WriteStringToFile(std::to_string(target), canonicalPath, true);
+    }
+
+    return ndk::ScopedAStatus::ok();
+}
+
+ndk::ScopedAStatus Power::clearNodeCeiling(const std::string& in_nodePath) {
+    LOG(INFO) << "Power clearNodeCeiling: " << in_nodePath;
+
+    if (in_nodePath.empty()) {
+        return ndk::ScopedAStatus::ok();
+    }
+
+    std::string canonicalPath = resolveCanonical(in_nodePath);
+    std::lock_guard<std::mutex> lock(mCeilingLock);
+
+    auto it = mNodeCeilings.find(canonicalPath);
+    if (it != mNodeCeilings.end()) {
+        if (!it->second.defaultValue.empty()) {
+            ::android::base::WriteStringToFile(it->second.defaultValue, canonicalPath, true);
+        }
+        mNodeCeilings.erase(it);
+    }
+
+    return ndk::ScopedAStatus::ok();
+}
+
+void Power::applyCeilings() {
+    std::lock_guard<std::mutex> lock(mCeilingLock);
+    if (mNodeCeilings.empty()) {
+        return;
+    }
+
+    for (const auto& [path, info] : mNodeCeilings) {
+        std::string currentVal;
+        if (!::android::base::ReadFileToString(path, &currentVal, true)) {
+            continue;
+        }
+        currentVal = ::android::base::Trim(currentVal);
+        char* end = nullptr;
+        int64_t val = strtoll(currentVal.c_str(), &end, 10);
+        if (end == currentVal.c_str() || *end != '\0') {
+            continue;
+        }
+
+        int64_t clamped = val;
+        if (info.maxCeiling > 0 && clamped > info.maxCeiling) {
+            clamped = info.maxCeiling;
+        }
+        if (info.minFloor > 0 && clamped < info.minFloor) {
+            clamped = info.minFloor;
+        }
+
+        if (clamped != val) {
+            ::android::base::WriteStringToFile(std::to_string(clamped), path, true);
+        }
+    }
+}
+
+binder_status_t Power::dump(int fd, const char** /*args*/, uint32_t /*numArgs*/) {
+    std::string buf = "QTI Power HAL AXKM Node Ceilings:\n";
+    {
+        std::lock_guard<std::mutex> lock(mCeilingLock);
+        if (mNodeCeilings.empty()) {
+            buf += "  No active node ceilings configured\n";
+        } else {
+            for (const auto& [path, info] : mNodeCeilings) {
+                buf += "  Node: " + path + "\n";
+                buf += "    Max Ceiling: " + std::to_string(info.maxCeiling) + "\n";
+                buf += "    Min Floor: " + std::to_string(info.minFloor) + "\n";
+                buf += "    Default Value: " + info.defaultValue + "\n";
+            }
+        }
+    }
+    ::android::base::WriteStringToFd(buf, fd);
+    return STATUS_OK;
 }
 
 }  // namespace impl

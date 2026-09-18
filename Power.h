@@ -34,15 +34,28 @@
 #include "aidl/android/hardware/power/SessionTag.h"
 #include "power-common.h"
 
+#include <climits>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+
 namespace aidl {
 namespace android {
 namespace hardware {
 namespace power {
 namespace impl {
 
+struct NodeCeilingInfo {
+    std::string canonicalPath;
+    std::string defaultValue;
+    int64_t maxCeiling{0};
+    int64_t minFloor{0};
+};
+
 class Power : public BnPower {
   public:
-    Power() : BnPower() { power_init(); }
+    Power();
+    virtual ~Power();
     ndk::ScopedAStatus setMode(Mode type, bool enabled) override;
     ndk::ScopedAStatus isModeSupported(Mode type, bool* _aidl_return) override;
     ndk::ScopedAStatus setBoost(Boost type, int32_t durationMs) override;
@@ -66,6 +79,16 @@ class Power : public BnPower {
                                       GpuHeadroomResult* _aidl_return) override;
     ndk::ScopedAStatus sendCompositionData(const std::vector<CompositionData>& data) override;
     ndk::ScopedAStatus sendCompositionUpdate(const CompositionUpdate& update) override;
+    ndk::ScopedAStatus setNodeCeiling(const std::string& in_nodePath, int64_t in_maxCeiling,
+                                      int64_t in_minFloor) override;
+    ndk::ScopedAStatus clearNodeCeiling(const std::string& in_nodePath) override;
+    binder_status_t dump(int fd, const char** args, uint32_t numArgs) override;
+
+    void applyCeilings();
+
+  private:
+    std::mutex mCeilingLock;
+    std::unordered_map<std::string, NodeCeilingInfo> mNodeCeilings;
 };
 
 }  // namespace impl
